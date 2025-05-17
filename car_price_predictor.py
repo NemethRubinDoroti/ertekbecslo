@@ -8,34 +8,21 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import matplotlib.pyplot as plt
 import seaborn as sns
-from itertools import product
 import optuna
 import joblib
 
 def clean_numeric(x):
-    """
-    Tisztítja és konvertálja a numerikus értékeket string formátumból.
-    
-    Args:
-        x: A konvertálandó érték
-        
-    Returns:
-        float: A konvertált numerikus érték vagy np.nan ha nem sikerült a konverzió
-    """
     if pd.isna(x):
         return np.nan
     if isinstance(x, str):
         try:
-            # Eltávolítjuk a mértékegységeket (bhp, cc, kmpl, stb.)
             x = x.lower().replace('bhp', '').replace('cc', '').replace('kmpl', '').strip()
-            # Csak a számokat és a pontot tartjuk meg
             numeric_str = ''.join([c for c in x if c.isdigit() or c == '.'])
             return float(numeric_str) if numeric_str else np.nan
         except:
             return np.nan
     return float(x) if not pd.isna(x) else np.nan
 
-# Adatok betöltése és előfeldolgozása
 def load_and_preprocess_data():
     # Adatok betöltése
     train_data = pd.read_csv('train-data.csv')
@@ -44,6 +31,10 @@ def load_and_preprocess_data():
     print("\nAdathalmaz információk:")
     print("\nTanító adathalmaz alakja:", train_data.shape)
     print("\nTeszt adathalmaz alakja:", test_data.shape)
+
+    print("\nTanító adathalmaz statisztikái:", train_data.describe())
+    
+    print("\nTeszt adathalmaz statisztikái:", test_data.describe())
     
     # Power, Engine és Mileage oszlopok tisztítása
     numeric_columns = ['Power', 'Engine', 'Mileage']
@@ -72,7 +63,7 @@ def load_and_preprocess_data():
     train_data['Power_per_Engine'] = train_data['Power'] / train_data['Engine'].replace(0, np.nan)
     test_data['Power_per_Engine'] = test_data['Power'] / test_data['Engine'].replace(0, np.nan)
     
-    # Kategorikus változók kódolása
+    # Kategorikus változók
     categorical_columns = ['Location', 'Fuel_Type', 'Transmission', 'Owner_Type']
     label_encoders = {}
     
@@ -85,12 +76,12 @@ def load_and_preprocess_data():
         label_encoders[column] = LabelEncoder()
         train_data[column] = label_encoders[column].fit_transform(train_data[column])
         
-        # Az ismeretlen kategóriákat a leggyakoribb kategóriára térképezzük
+        # Az ismeretlen kategóriákat a leggyakoribb kategóriára állítjuk
         known_categories = set(label_encoders[column].classes_)
         test_data[column] = test_data[column].map(lambda x: x if x in known_categories else most_frequent)
         test_data[column] = label_encoders[column].transform(test_data[column])
     
-    # Brand kezelése
+    # Márka kezelése
     train_data['Brand'] = train_data['Name'].fillna('Other').apply(lambda x: x.split()[0] if isinstance(x, str) else 'Other')
     test_data['Brand'] = test_data['Name'].fillna('Other').apply(lambda x: x.split()[0] if isinstance(x, str) else 'Other')
     
@@ -104,7 +95,7 @@ def load_and_preprocess_data():
     train_data['Brand'] = brand_encoder.fit_transform(train_data['Brand'])
     test_data['Brand'] = brand_encoder.transform(test_data['Brand'])
     
-    # Brand átlagos ára
+    # Márka átlagára
     brand_mean_price = train_data.groupby('Brand')['Price'].mean()
     train_data['Brand_Mean_Price'] = train_data['Brand'].map(brand_mean_price)
     test_data['Brand_Mean_Price'] = test_data['Brand'].map(brand_mean_price)
@@ -152,9 +143,8 @@ def plot_data_analysis(data, label_encoders, brand_encoder):
     plt.savefig('price_distribution.png')
     plt.close()
     
-    # Brand szerinti átlagár
+   
     plt.figure(figsize=(15, 6))
-    # Visszakódoljuk a márkaneveket
     brand_names = brand_encoder.inverse_transform(range(len(brand_encoder.classes_)))
     brand_avg_price = data.groupby('Brand')['Price'].mean()
     brand_avg_price.index = brand_names[brand_avg_price.index]
@@ -266,7 +256,6 @@ def objective(trial, X, y):
     learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
     weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True)
     
-    # Cross-validation
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
     cv_scores = []
     
@@ -274,7 +263,6 @@ def objective(trial, X, y):
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
         
-        # Modell létrehozása és tanítása
         model = CarPricePredictor(X.shape[1], hidden_sizes, dropout_rate)
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -309,12 +297,17 @@ def train_ensemble(X, y, test_data, best_params):
     y_scaled = scaler_y.fit_transform(y.values.reshape(-1, 1)).ravel()
     X_test_scaled = scaler_X.transform(test_data)
     
+    # Train-test split for evaluation
+    X_train, X_val, y_train, y_val = train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=42)
+    
     # Ensemble modellek létrehozása
     models = []
     n_models = 5
     
+    # Evaluation metrics storage
+    model_metrics = []
+    
     for i in range(n_models):
-        # Neural Network
         nn_model = CarPricePredictor(
             X.shape[1],
             hidden_sizes=[
@@ -325,7 +318,6 @@ def train_ensemble(X, y, test_data, best_params):
             dropout_rate=best_params['dropout_rate']
         )
         
-        # Random Forest
         rf_model = RandomForestRegressor(
             n_estimators=100,
             max_depth=10,
@@ -347,7 +339,7 @@ def train_ensemble(X, y, test_data, best_params):
                 weight_decay=best_params['weight_decay']
             )
             
-            # Learning rate scheduler hozzáadása - verbose paraméter nélkül
+            # Learning rate scheduler
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
                 mode='min',
@@ -359,7 +351,6 @@ def train_ensemble(X, y, test_data, best_params):
             X_tensor = torch.FloatTensor(X_scaled)
             y_tensor = torch.FloatTensor(y_scaled)
             
-            # Train-validation split
             train_size = int(0.8 * len(X_tensor))
             indices = torch.randperm(len(X_tensor))
             train_indices = indices[:train_size]
@@ -382,7 +373,7 @@ def train_ensemble(X, y, test_data, best_params):
                 train_loss.backward()
                 optimizer.step()
                 
-                # Validation
+                # Validáció
                 model.eval()
                 with torch.no_grad():
                     val_outputs = model(X_val)
@@ -399,7 +390,7 @@ def train_ensemble(X, y, test_data, best_params):
                         patience_counter += 1
                     
                     if patience_counter >= max_patience:
-                        print(f"Early stopping triggered for model {i} at epoch {epoch}")
+                        print(f"{i}. Model korai leállítása, nincs javulás. Epoch: {epoch}")
                         break
                     
                     # Kiírjuk a tanulási folyamat állapotát minden 10. epochban
@@ -411,10 +402,53 @@ def train_ensemble(X, y, test_data, best_params):
             with torch.no_grad():
                 X_test_tensor = torch.FloatTensor(X_test_scaled)
                 pred = model(X_test_tensor).numpy()
+                
+                X_val_tensor = torch.FloatTensor(X_val)
+                y_pred_val = model(X_val_tensor).numpy().flatten()
+                y_val_np = y_val.numpy()
+                
+                # Mutatók kiszámítása
+                mse = mean_squared_error(y_val_np, y_pred_val)
+                rmse = np.sqrt(mse)
+                mae = mean_absolute_error(y_val_np, y_pred_val)
+                r2 = r2_score(y_val_np, y_pred_val)
+                
+                # Mutatók mentése
+                model_metrics.append({
+                    'model_type': 'Neural Network',
+                    'model_number': i // 2,
+                    'mse': mse,
+                    'rmse': rmse,
+                    'mae': mae,
+                    'r2': r2
+                })
+                
+                print(f"Neural Network {i // 2} Metrics - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R²: {r2:.4f}")
         else:
             # Random Forest tanítása
-            model.fit(X_scaled, y_scaled)
+            model.fit(X_train, y_train)
             pred = model.predict(X_test_scaled).reshape(-1, 1)
+            
+            # Model értékelése
+            y_pred_val = model.predict(X_val)
+            
+            # Mutatók kiszámítása
+            mse = mean_squared_error(y_val, y_pred_val)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(y_val, y_pred_val)
+            r2 = r2_score(y_val, y_pred_val)
+            
+            # Mutatók mentése
+            model_metrics.append({
+                'model_type': 'Random Forest',
+                'model_number': (i-1) // 2,
+                'mse': mse,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2
+            })
+            
+            print(f"Random Forest {(i-1) // 2} Metrics - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R²: {r2:.4f}")
         
         predictions.append(pred)
     
@@ -422,7 +456,36 @@ def train_ensemble(X, y, test_data, best_params):
     ensemble_predictions = np.mean(predictions, axis=0)
     final_predictions = scaler_y.inverse_transform(ensemble_predictions)
     
-    return final_predictions, models
+    # Ensemble modell értékelése
+    ensemble_val_preds = np.zeros_like(y_val)
+    for i, model in enumerate(models):
+        if isinstance(model, nn.Module):
+            model.eval()
+            with torch.no_grad():
+                val_outputs = model(torch.FloatTensor(X_val)).numpy().flatten()
+                ensemble_val_preds += val_outputs
+        else:
+            val_outputs = model.predict(X_val)
+            ensemble_val_preds += val_outputs
+    
+    ensemble_val_preds /= len(models)
+    
+    # Mutatók kiszámítása
+    ensemble_mse = mean_squared_error(y_val, ensemble_val_preds)
+    ensemble_rmse = np.sqrt(ensemble_mse)
+    ensemble_mae = mean_absolute_error(y_val, ensemble_val_preds)
+    ensemble_r2 = r2_score(y_val, ensemble_val_preds)
+    
+    print("\nEnsemble Model Metrics:")
+    print(f"MSE: {ensemble_mse:.4f}")
+    print(f"RMSE: {ensemble_rmse:.4f}")
+    print(f"MAE: {ensemble_mae:.4f}")
+    print(f"R²: {ensemble_r2:.4f}")
+    
+    # Mutatók mentése
+    metrics_df = pd.DataFrame(model_metrics)
+    
+    return final_predictions, models, metrics_df
 
 def main():
     # Adatok betöltése és előfeldolgozása
@@ -436,12 +499,25 @@ def main():
     print("\nLegjobb hyperparaméterek:", best_params)
     
     # Ensemble modell tanítása
-    predictions, models = train_ensemble(X, y, test_data, best_params)
+    predictions, models, metrics_df = train_ensemble(X, y, test_data, best_params)
     
     # Eredmények mentése
     test_predictions_df = pd.DataFrame(predictions, columns=['Predicted_Price'])
     test_predictions_df.to_csv('predictions.csv', index=False)
+    metrics_df.to_csv('model_metrics.csv', index=False)
     print("\nA predikciók mentésre kerültek a 'predictions.csv' fájlba.")
+    print("A modell metrikák mentésre kerültek a 'model_metrics.csv' fájlba.")
+    
+    # Mutatók vizualizációja
+    plt.figure(figsize=(10, 6))
+    metric_pivot = metrics_df.pivot(columns='model_type', values='rmse', index='model_number')
+    metric_pivot.plot(kind='bar')
+    plt.title('RMSE összehasonlítás a modellek típusának függvényében')
+    plt.ylabel('RMSE (Root Mean Squared Error)')
+    plt.xlabel('Model Number')
+    plt.tight_layout()
+    plt.savefig('rmse_comparison.png')
+    plt.close()
     
     # Modellek mentése
     for i, model in enumerate(models):
